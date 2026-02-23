@@ -71,7 +71,6 @@ bool InspectFile::evaluate(Transaction *transaction, const std::string &str) {
 
 #ifndef WIN32
     /*
-     * SECURITY HARDENING:
      * Replace shell-based popen() execution with fork()+execvp()
      * to avoid shell interpretation while preserving behavior.
      */
@@ -153,7 +152,7 @@ bool InspectFile::evaluate(Transaction *transaction, const std::string &str) {
 
     res.append(s.str());
     if (res.size() > 1 && res[0] != '1') {
-        return true; /* match */
+        return true; 
     }
 
     return false;
