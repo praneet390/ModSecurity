@@ -13,18 +13,30 @@
  *
  */
 
+/*
+ * ModSecurity, http://www.modsecurity.org/
+ * Copyright (c) 2015 - 2021 Trustwave Holdings, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0
+ */
+
 #include "src/operators/inspect_file.h"
 
 #include <stdio.h>
-
 #include <string>
 #include <iostream>
+#include <sstream>
 
 #include "src/operators/operator.h"
 #include "src/utils/system.h"
 
 #ifdef WIN32
 #include "src/compat/msvc.h"
+#else
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <vector>
 #endif
 
 namespace modsecurity {
@@ -52,40 +64,101 @@ bool InspectFile::init(const std::string &param2, std::string *error) {
     return true;
 }
 
-
 bool InspectFile::evaluate(Transaction *transaction, const std::string &str) {
     if (m_isScript) {
         return m_lua.run(transaction, str);
-    } else {
-        FILE *in;
-        char buff[512];
-        std::stringstream s;
-        std::string res;
-        std::string openstr;
+    }
 
-        openstr.append(m_param);
-        openstr.append(" ");
-        openstr.append(str);
-        if (!(in = popen(openstr.c_str(), "r"))) {
-            return false;
-        }
+#ifndef WIN32
+    /*
+     * SECURITY HARDENING:
+     * Replace shell-based popen() execution with fork()+execvp()
+     * to avoid shell interpretation while preserving behavior.
+     */
 
-        while (fgets(buff, sizeof(buff), in) != NULL) {
-            s << buff;
-        }
-
-        pclose(in);
-
-        res.append(s.str());
-        if (res.size() > 1 && res[0] != '1') {
-            return true; /* match */
-        }
-
-        /* no match */
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
         return false;
     }
-}
 
+    pid_t pid = fork();
+    if (pid == -1) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return false;
+    }
+
+    if (pid == 0) {
+        // Child process
+        close(pipefd[0]);                 // Close read end
+        dup2(pipefd[1], STDOUT_FILENO);   // Redirect stdout
+        close(pipefd[1]);
+
+        std::vector<char*> argv;
+        argv.push_back(const_cast<char*>(m_param.c_str()));
+        argv.push_back(const_cast<char*>(str.c_str()));
+        argv.push_back(nullptr);
+
+        execvp(argv[0], argv.data());
+
+        // execvp failed
+        _exit(1);
+    }
+
+    // Parent process
+    close(pipefd[1]); // Close write end
+
+    char buff[512];
+    std::stringstream s;
+    ssize_t count;
+
+    while ((count = read(pipefd[0], buff, sizeof(buff))) > 0) {
+        s.write(buff, count);
+    }
+
+    close(pipefd[0]);
+    waitpid(pid, nullptr, 0);
+
+    std::string res = s.str();
+
+    if (res.size() > 1 && res[0] != '1') {
+        return true; /* match */
+    }
+
+    return false;
+
+#else
+    /*
+     * Windows fallback: preserve existing behavior
+     */
+    FILE *in;
+    char buff[512];
+    std::stringstream s;
+    std::string res;
+    std::string openstr;
+
+    openstr.append(m_param);
+    openstr.append(" ");
+    openstr.append(str);
+
+    if (!(in = popen(openstr.c_str(), "r"))) {
+        return false;
+    }
+
+    while (fgets(buff, sizeof(buff), in) != NULL) {
+        s << buff;
+    }
+
+    pclose(in);
+
+    res.append(s.str());
+    if (res.size() > 1 && res[0] != '1') {
+        return true; /* match */
+    }
+
+    return false;
+#endif
+}
 
 }  // namespace operators
 }  // namespace modsecurity
